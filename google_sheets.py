@@ -194,6 +194,214 @@ class GoogleSheets:
             )
         )
 
+    def _get_grid_range(self, range_name: str) -> dict[str, int]:
+        """Преобразует диапазон с названием листа в координаты API."""
+        if "!" not in range_name:
+            raise GoogleSheetsError("Укажите диапазон вместе с названием листа.")
+
+        sheet_name, cell_range = range_name.rsplit("!", 1)
+        if sheet_name.startswith("'") and sheet_name.endswith("'"):
+            sheet_name = sheet_name[1:-1].replace("''", "'")
+
+        sheet_id = next(
+            (
+                sheet["sheetId"]
+                for sheet in self._get_sheet_properties()
+                if sheet["title"] == sheet_name
+            ),
+            None,
+        )
+        if sheet_id is None:
+            raise GoogleSheetsError("Лист с таким названием не найден.")
+
+        cells = cell_range.split(":")
+        if len(cells) == 1:
+            cells.append(cells[0])
+        if len(cells) != 2:
+            raise GoogleSheetsError("Некорректный диапазон ячеек.")
+
+        def parse_cell(cell: str) -> tuple[int, int]:
+            column = 0
+            position = 0
+            while position < len(cell) and cell[position].isalpha():
+                column = column * 26 + ord(cell[position].upper()) - ord("A") + 1
+                position += 1
+            row = cell[position:]
+            if column == 0 or not row.isdigit() or int(row) < 1:
+                raise GoogleSheetsError("Некорректный диапазон ячеек.")
+            return column - 1, int(row) - 1
+
+        start_column, start_row = parse_cell(cells[0])
+        end_column, end_row = parse_cell(cells[1])
+        if end_column < start_column or end_row < start_row:
+            raise GoogleSheetsError("Некорректный диапазон ячеек.")
+
+        return {
+            "sheetId": sheet_id,
+            "startRowIndex": start_row,
+            "endRowIndex": end_row + 1,
+            "startColumnIndex": start_column,
+            "endColumnIndex": end_column + 1,
+        }
+
+    def format_range(
+        self,
+        range_name: str,
+        background_color: dict[str, float] | None = None,
+        text_color: dict[str, float] | None = None,
+        font_size: int | None = None,
+        bold: bool | None = None,
+        horizontal_alignment: str | None = None,
+    ) -> dict[str, Any]:
+        """Задаёт цвет, шрифт и выравнивание диапазона."""
+        cell_format: dict[str, Any] = {}
+        fields: list[str] = []
+        if background_color is not None:
+            cell_format["backgroundColor"] = background_color
+            fields.append("userEnteredFormat.backgroundColor")
+        text_format: dict[str, Any] = {}
+        if text_color is not None:
+            text_format["foregroundColor"] = text_color
+            fields.append("userEnteredFormat.textFormat.foregroundColor")
+        if font_size is not None:
+            text_format["fontSize"] = font_size
+            fields.append("userEnteredFormat.textFormat.fontSize")
+        if bold is not None:
+            text_format["bold"] = bold
+            fields.append("userEnteredFormat.textFormat.bold")
+        if text_format:
+            cell_format["textFormat"] = text_format
+        if horizontal_alignment is not None:
+            cell_format["horizontalAlignment"] = horizontal_alignment
+            fields.append("userEnteredFormat.horizontalAlignment")
+        if not fields:
+            raise GoogleSheetsError("Не указаны параметры форматирования.")
+
+        return self._execute(
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "repeatCell": {
+                                "range": self._get_grid_range(range_name),
+                                "cell": {"userEnteredFormat": cell_format},
+                                "fields": ",".join(fields),
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+
+    def merge_cells(
+        self, range_name: str, merge_type: str = "MERGE_ALL"
+    ) -> dict[str, Any]:
+        """Объединяет ячейки указанного диапазона."""
+        return self._execute(
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "mergeCells": {
+                                "range": self._get_grid_range(range_name),
+                                "mergeType": merge_type,
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+
+    def set_borders(
+        self,
+        range_name: str,
+        color: dict[str, float] | None = None,
+        style: str = "SOLID",
+    ) -> dict[str, Any]:
+        """Устанавливает границы диапазона ячеек."""
+        border: dict[str, Any] = {"style": style}
+        if color is not None:
+            border["color"] = color
+        borders = {
+            side: border
+            for side in ("top", "bottom", "left", "right", "innerHorizontal", "innerVertical")
+        }
+        return self._execute(
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "updateBorders": {
+                                "range": self._get_grid_range(range_name),
+                                **borders,
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+
+    def set_column_width(
+        self, range_name: str, pixel_size: int
+    ) -> dict[str, Any]:
+        """Задаёт ширину столбцов в пикселях."""
+        grid_range = self._get_grid_range(range_name)
+        return self._execute(
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": grid_range["sheetId"],
+                                    "dimension": "COLUMNS",
+                                    "startIndex": grid_range["startColumnIndex"],
+                                    "endIndex": grid_range["endColumnIndex"],
+                                },
+                                "properties": {"pixelSize": pixel_size},
+                                "fields": "pixelSize",
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+
+    def set_number_format(
+        self,
+        range_name: str,
+        format_type: str = "CURRENCY",
+        pattern: str = '"$"#,##0.00',
+    ) -> dict[str, Any]:
+        """Задаёт числовой формат ячеек диапазона."""
+        return self._execute(
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "repeatCell": {
+                                "range": self._get_grid_range(range_name),
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "numberFormat": {
+                                            "type": format_type,
+                                            "pattern": pattern,
+                                        }
+                                    }
+                                },
+                                "fields": "userEnteredFormat.numberFormat",
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+
 
 def main() -> None:
     """Читает первый лист по настройкам из файла .env."""
